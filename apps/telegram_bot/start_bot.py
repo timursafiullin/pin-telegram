@@ -1,9 +1,14 @@
 import asyncio
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from apps.telegram_bot.config import settings
 
 from apps.telegram_bot.create_bot import bot, dp
-from apps.telegram_bot.create_bot import start_router
+from apps.telegram_bot.handlers.start import start_router
 
 # Start Bot
 async def main():
