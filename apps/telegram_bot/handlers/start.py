@@ -1,8 +1,10 @@
-from aiogram import types
+from aiogram import Router
+from aiogram.filters import CommandStart
+from aiogram.types import Message
 
-from ..main import dp
+start_router = Router()
 
-@dp.message_handler(commands=['start'], state='*')
-async def start_bot(message: types.Message):
+@start_router.message(CommandStart())
+async def start_router(message: Message):
     userid = message.from_user_id
     await message.answer(text=userid)
