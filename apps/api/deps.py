@@ -1,9 +1,7 @@
 from fastapi import Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from corelib.config import Settings
 
-from corelib.db.session import get_async_session
+from corelib.db.session import AsyncSession, get_async_session
 from corelib.services import (
     LLMService,
     NLPService,

@@ -1,11 +1,10 @@
 import os
-from dotenv import load_dotenv
-
 from logging.config import fileConfig
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+
 from alembic import context
-from sqlalchemy import inspect
+from dotenv import load_dotenv
+from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from corelib.db.models import Base
 
@@ -16,6 +15,7 @@ config = context.config
 fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
 
 def run_migrations_offline():
     context.configure(
@@ -28,30 +28,31 @@ def run_migrations_offline():
     with context.begin_transaction():
         context.run_migrations()
 
-async def run_migrations_online():
-    engine = create_async_engine(database_url, echo=True)
 
-    async_session_maker = sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
+def do_run_migrations(connection):
+    context.configure(
+        connection=connection,
+        target_metadata=Base.metadata,
+        compare_type=True,
+        compare_server_default=True,
     )
 
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_migrations_online():
+    engine = create_async_engine(database_url, poolclass=pool.NullPool)
+
     async with engine.connect() as connection:
-        # Inspect the connection to check for the version table instead of using has_table()
-        inspector = inspect(connection)
-        if not inspector.has_table('alembic_version'):
-            raise Exception("The alembic_version table does not exist!")
+        await connection.run_sync(do_run_migrations)
 
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
+    await engine.dispose()
 
-        # Use async context manager for transactions
-        async with connection.begin():
-            await context.run_migrations()
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
     import asyncio
+
     asyncio.run(run_migrations_online())
