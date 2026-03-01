@@ -1,9 +1,10 @@
 from datetime import datetime
+from typing import Any, Type
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil import parser
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.deps import get_llm_service, get_nlp_service, get_schedule_service, get_user
@@ -40,6 +41,51 @@ class CreateInvitePayload(BaseModel):
     role: str = "user"
     max_uses: int = Field(default=1, ge=1)
     expires_in_days: int = Field(default=3, ge=1)
+
+
+class AddEventEntities(BaseModel):
+    date: str
+    time: str
+    title: str | None = None
+    location: str | None = None
+    recurrence: str | None = None
+    remind_before_minutes: int | None = None
+
+
+class GetScheduleEntities(BaseModel):
+    date: str | None = None
+
+
+class CreateInviteCodeEntities(BaseModel):
+    role: str = "user"
+    max_uses: int = Field(default=1, ge=1)
+    expires_in_days: int = Field(default=3, ge=1)
+
+
+def validate_intent_payload(intent: str, entities: Any) -> tuple[BaseModel | None, str | None]:
+    safe_entities = entities if isinstance(entities, dict) else {}
+
+    models_by_intent: dict[str, Type[BaseModel]] = {
+        "add_event": AddEventEntities,
+        "get_schedule": GetScheduleEntities,
+        "create_invite_code": CreateInviteCodeEntities,
+    }
+    error_messages_by_intent = {
+        "add_event": "Could not recognize date/time. Please clarify date and time.",
+        "create_invite_code": "Could not recognize invite parameters. Please clarify your request.",
+    }
+
+    if intent == "add_event" and (not safe_entities.get("date") or not safe_entities.get("time")):
+        return None, error_messages_by_intent["add_event"]
+
+    model_cls = models_by_intent.get(intent)
+    if model_cls is None:
+        return None, None
+
+    try:
+        return model_cls.model_validate(safe_entities), None
+    except ValidationError:
+        return None, error_messages_by_intent.get(intent, "Could not process request parameters. Please clarify your request.")
 
 
 @router.on_event("startup")
@@ -165,36 +211,70 @@ async def handle_bot_message(
 ):
     user_repo = UserRepository(session)
     user = await user_repo.get_by_telegram_id(payload.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
     parsed = await nlp_service.parse_intent_list(payload.text)
 
     result = []
     secure_replies = []
     for p in parsed:
         intent = p.get("intent")
-        entities = p.get("entities", {})
+        entities = p.get("entities")
+        validated_entities, validation_error = validate_intent_payload(intent, entities)
+
+        if validation_error:
+            secure_replies.append(validation_error)
+            continue
 
         if intent == "add_event":
-            dt = parser.parse(f"{entities['date']} {entities['time']}").astimezone(ZoneInfo(user.timezone))
+            add_event_entities = validated_entities
+            if not isinstance(add_event_entities, AddEventEntities):
+                secure_replies.append("Could not process event parameters. Please clarify your request.")
+                continue
+            try:
+                dt = parser.parse(f"{add_event_entities.date} {add_event_entities.time}").astimezone(
+                    ZoneInfo(user.timezone)
+                )
+            except (ValueError, TypeError, OverflowError):
+                secure_replies.append("Invalid date/time format. Please use something like: 2026-03-20 18:30")
+                continue
+
             created_event = await schedule_service.create_event(
                 user_id=user.id,
-                title=entities.get("title") or p.get("title") or "Event",
+                title=add_event_entities.title or p.get("title") or "Event",
                 start_time=dt,
-                location=p.get("location"),
-                recurrence=p.get("recurrence"),
-                remind_before_minutes=p.get("remind_before_minutes", 60),
+                location=add_event_entities.location or p.get("location"),
+                recurrence=add_event_entities.recurrence or p.get("recurrence"),
+                remind_before_minutes=add_event_entities.remind_before_minutes or p.get("remind_before_minutes", 60),
             )
             result.append({"event": {"title": created_event.title, "start_time": created_event.start_time.isoformat()}})
         elif intent == "get_schedule":
-            day = parser.parse(entities["date"]) if entities.get("date") else datetime.now(tz=ZoneInfo(user.timezone))
+            get_schedule_entities = validated_entities
+            if not isinstance(get_schedule_entities, GetScheduleEntities):
+                secure_replies.append("Could not recognize schedule date. Please clarify your request.")
+                continue
+            if get_schedule_entities.date:
+                try:
+                    day = parser.parse(get_schedule_entities.date)
+                except (ValueError, TypeError, OverflowError):
+                    secure_replies.append("Invalid schedule date format. Please provide a valid date.")
+                    continue
+            else:
+                day = datetime.now(tz=ZoneInfo(user.timezone))
             events = await schedule_service.get_upcoming_events(user.id, day)
             result.append({"events": [{"title": e.title, "start_time": e.start_time.isoformat()} for e in events]})
         elif intent == "create_invite_code":
             if user.role != "owner":
                 secure_replies.append("Only owner can create invite codes.")
                 continue
-            role = entities.get("role", "user")
-            max_uses = int(entities.get("max_uses", 1))
-            expires_in_days = int(entities.get("expires_in_days", 3))
+            invite_entities = validated_entities
+            if not isinstance(invite_entities, CreateInviteCodeEntities):
+                secure_replies.append("Could not recognize invite parameters. Please clarify your request.")
+                continue
+            role = invite_entities.role
+            max_uses = invite_entities.max_uses
+            expires_in_days = invite_entities.expires_in_days
             if role not in ALLOWED_INVITE_ROLES:
                 secure_replies.append("Unknown role for invite code.")
                 continue
