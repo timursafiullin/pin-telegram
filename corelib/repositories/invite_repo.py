@@ -20,7 +20,7 @@ class InviteRepository:
 
         invite = Invite(
             code=self._generate_code(),
-            role="user",
+            role="owner",
             max_uses=None,
             expires_at=None,
             is_active=True,
