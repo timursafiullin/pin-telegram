@@ -25,9 +25,10 @@ class Invite(Base):
     id = Column(Integer, primary_key=True)
     code = Column(String, unique=True, nullable=False)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    used_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    role = Column(String, nullable=False, default="user")
+    max_uses = Column(Integer, nullable=True)
+    uses_count = Column(Integer, nullable=False, default=0)
     expires_at = Column(DateTime(timezone=True), nullable=True)
-    used_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

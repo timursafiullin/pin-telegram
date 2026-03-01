@@ -12,7 +12,7 @@ class LLMService:
     ) -> str:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                self.settings.LLM_API_URL,
+                f"{self.settings.LLM_API_URL}/{self.settings.LLM_MODEL}",
                 headers={"Authorization": f"Bearer {self.settings.LLM_API_KEY}"},
                 json={
                     "model": self.settings.LLM_MODEL,
