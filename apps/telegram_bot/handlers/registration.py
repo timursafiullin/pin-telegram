@@ -1,19 +1,25 @@
 import httpx
 from aiogram import Router, F
-from aiogram.filters import CommandStart, StateFilter, Command
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 
+from apps.config import settings
 from apps.telegram_bot.handlers.states import Registration
 from apps.telegram_bot.keyboards.registration import (
-    get_timezone_keyboard,
     get_registration_type_keyboard,
     back_to_choose_reg_type_button,
     request_confirmation,
-    share_geolocation_reply,
+    get_timezone_keyboard_reply,
 )
 
 router = Router()
+USE_DEFAULT_PREFIX = "Use default ("
+
+
+def normalize_timezone(timezone_name: str, fallback: str = "Etc/UTC") -> str:
+    timezone_name = (timezone_name or "").strip()
+    return timezone_name or fallback
 
 
 @router.message(CommandStart())
@@ -22,6 +28,7 @@ async def handle_start(message: Message, state: FSMContext):
     payload = {
         "telegram_id": telegram_id,
         "name": message.from_user.full_name if message.from_user else None,
+        "language": message.from_user.language_code if message.from_user else None,
     }
 
     async with httpx.AsyncClient() as client:
@@ -48,8 +55,9 @@ async def handle_choose_reg_type_query(callback: CallbackQuery, state: FSMContex
     payload = {
         "telegram_id": telegram_id,
         "name": callback.from_user.full_name if callback.from_user else None,
+        "language": callback.from_user.language_code if callback.from_user else None,
     }
-    
+
     async with httpx.AsyncClient() as client:
         response = await client.post("http://localhost:8000/bot/register/start", json=payload)
         response.raise_for_status()
@@ -78,7 +86,7 @@ async def handle_answer(message: Message, state: FSMContext):
 @router.callback_query(F.data == "have_invite_code")
 async def choose_registration_type(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    if (callback.data == "have_invite_code"):
+    if callback.data == "have_invite_code":
         await state.set_state(Registration.awaiting_invite_code)
         await callback.message.edit_text(
             text="Please enter your invite code for registration.",
@@ -116,42 +124,60 @@ async def handle_invite(message: Message, state: FSMContext):
 
     await state.set_state(Registration.awaiting_timezone)
     await message.answer(
-        text="Invite accepted. Now, share your location to set your time zone. This is necessary for schedules and reminders to work correctly.",
-        reply_markup=get_timezone_keyboard()
+        text="Invite accepted. Share location or use default timezone.",
+        reply_markup=get_timezone_keyboard_reply(normalize_timezone(settings.DEFAULT_TIMEZONE))
     )
 
 
 @router.message(StateFilter(Registration.awaiting_timezone))
 async def handle_timezone(message: Message, state: FSMContext):
     telegram_id = str(message.from_user.id)
-    payload = {"telegram_id": telegram_id, "timezone": message.text.strip()}
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post("http://localhost:8000/bot/register/timezone", json=payload)
+    if message.location:
+        payload = {
+            "telegram_id": telegram_id,
+            "lat": message.location.latitude,
+            "lon": message.location.longitude,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post("http://localhost:8000/bot/register/timezone/by_location", json=payload)
 
-    if response.status_code >= 400:
+        if response.status_code >= 400:
+            await message.answer(
+                text="Не получилось определить таймзону. Отправь геолокацию ещё раз или выбери default.",
+                reply_markup=get_timezone_keyboard_reply(normalize_timezone(settings.DEFAULT_TIMEZONE))
+            )
+            return
+
+        await state.clear()
         await message.answer(
-            text="Something went wrong. Please, share your location to set your time zone. This is necessary for schedules and reminders to work correctly.",
-            reply_markup=get_timezone_keyboard()
+            "Registration completed. You can now send regular requests.",
+            reply_markup=ReplyKeyboardRemove()
         )
         return
 
-    await state.clear()
-    await message.answer("Registration completed. You can now send regular requests.")
+    text = (message.text or "").strip()
+    if text.startswith(USE_DEFAULT_PREFIX) and text.endswith(")"):
+        payload = {"telegram_id": telegram_id}
 
+        async with httpx.AsyncClient() as client:
+            response = await client.post("http://localhost:8000/bot/register/timezone/default", json=payload)
 
-@router.callback_query(F.data == "choose_own_timezone")
-async def handle_choose_own_timezone(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer(
-        text="Choose one on keyboard.",
-        reply_markup=share_geolocation_reply()
-    )
+        if response.status_code >= 400:
+            await message.answer(
+                text="Something went wrong. Try again or share your location.",
+                reply_markup=get_timezone_keyboard_reply(normalize_timezone(settings.DEFAULT_TIMEZONE))
+            )
+            return
 
+        await state.clear()
+        await message.answer(
+            "Registration completed. You can now send regular requests.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
 
-@router.message(F.text == "🔙 Go back")
-@router.callback_query(F.data == "back_to_choose_timezone")
-async def handle_back_to_timezone(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        text="Please, share your location to set your time zone. This is necessary for schedules and reminders to work correctly.",
-        reply_markup=get_timezone_keyboard()
+    await message.answer(
+        text="Нажми кнопку: отправь геолокацию или выбери default.",
+        reply_markup=get_timezone_keyboard_reply(normalize_timezone(settings.DEFAULT_TIMEZONE))
     )

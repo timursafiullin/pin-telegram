@@ -21,14 +21,24 @@ class UserRepository:
         telegram_id: str,
         name: str | None,
         role: str = "tester",
+        language: str | None = None,
     ) -> User:
         user = User(
             telegram_id=telegram_id,
             name=name,
             role=role,
+            language=(language or "en"),
             is_active=False,
         )
         self.session.add(user)
+        await self.session.commit()
+        await self.session.refresh(user)
+        return user
+
+    async def update_profile(self, user: User, name: str | None = None, language: str | None = None) -> User:
+        user.name = name
+        if language:
+            user.language = language
         await self.session.commit()
         await self.session.refresh(user)
         return user

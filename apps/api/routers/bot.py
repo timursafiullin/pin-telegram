@@ -8,6 +8,7 @@ from dateutil import parser
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
+from timezonefinder import TimezoneFinder
 
 from apps.api.deps import get_llm_service, get_nlp_service, get_schedule_service, get_user
 from apps.config import settings
@@ -25,6 +26,7 @@ EXPECTED_ENTITY_FORMATS = {
     "create_invite_code": {"role": "user|tester|owner", "max_uses": ">=1", "expires_in_days": ">=1"},
 }
 logger = logging.getLogger("apps.api.bot")
+timezone_finder = TimezoneFinder()
 
 
 class BotMessage(BaseModel):
@@ -35,6 +37,7 @@ class BotMessage(BaseModel):
 class StartPayload(BaseModel):
     telegram_id: str
     name: str | None = None
+    language: str | None = None
 
 
 class InvitePayload(BaseModel):
@@ -45,6 +48,16 @@ class InvitePayload(BaseModel):
 class TimezonePayload(BaseModel):
     telegram_id: str
     timezone: str
+
+
+class TimezoneByLocationPayload(BaseModel):
+    telegram_id: str
+    lat: float
+    lon: float
+
+
+class TimezoneDefaultPayload(BaseModel):
+    telegram_id: str
 
 
 class CreateInvitePayload(BaseModel):
@@ -93,6 +106,18 @@ def _visible_text(text: str) -> str:
     return "[REDACTED: set LOG_VERBOSE_BOT_PAYLOAD=true for full payload]"
 
 
+
+
+def normalize_iana_timezone(timezone_name: str | None, fallback: str = "Etc/UTC") -> str:
+    candidate = (timezone_name or "").strip()
+    if not candidate:
+        return fallback
+    try:
+        ZoneInfo(candidate)
+        return candidate
+    except ZoneInfoNotFoundError:
+        return fallback
+
 def validate_intent_payload(intent: str, entities: Any) -> tuple[BaseModel | None, str | None]:
     safe_entities = entities if isinstance(entities, dict) else {}
 
@@ -132,7 +157,17 @@ async def register_start(payload: StartPayload, session: AsyncSession = Depends(
     user_repo = UserRepository(session)
     user = await user_repo.get_by_telegram_id(payload.telegram_id)
     if user is None:
-        user = await user_repo.create_pending_telegram_user(payload.telegram_id, payload.name)
+        user = await user_repo.create_pending_telegram_user(
+            payload.telegram_id,
+            payload.name,
+            language=payload.language,
+        )
+    else:
+        await user_repo.update_profile(
+            user,
+            name=payload.name,
+            language=payload.language,
+        )
 
     if user.is_active:
         return {"status": "registered", "message": "Welcome back!"}
@@ -176,6 +211,42 @@ async def register_timezone(payload: TimezonePayload, session: AsyncSession = De
 
     await user_repo.activate_user_with_timezone(user, payload.timezone, role=user.role)
     return {"status": "registered", "message": "Registration completed."}
+
+
+@router.post("/register/timezone/by_location")
+async def register_timezone_by_location(
+    payload: TimezoneByLocationPayload,
+    session: AsyncSession = Depends(get_async_session),
+):
+    user_repo = UserRepository(session)
+    user = await user_repo.get_by_telegram_id(payload.telegram_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    timezone = normalize_iana_timezone(
+        timezone_finder.timezone_at(lat=payload.lat, lng=payload.lon),
+        fallback="Etc/UTC",
+    )
+
+    await user_repo.activate_user_with_timezone(user, timezone, role=user.role)
+    return {"status": "registered", "timezone": timezone, "message": "Registration completed."}
+
+
+
+
+@router.post("/register/timezone/default")
+async def register_timezone_default(
+    payload: TimezoneDefaultPayload,
+    session: AsyncSession = Depends(get_async_session),
+):
+    user_repo = UserRepository(session)
+    user = await user_repo.get_by_telegram_id(payload.telegram_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    timezone = normalize_iana_timezone(settings.DEFAULT_TIMEZONE, fallback="Etc/UTC")
+    await user_repo.activate_user_with_timezone(user, timezone, role=user.role)
+    return {"status": "registered", "timezone": timezone, "message": "Registration completed."}
 
 
 @router.post("/invites/create")
@@ -408,6 +479,7 @@ async def handle_bot_message(
         answer = await llm_service.chat_completion(
             [
                 {"role": "system", "content": f"You are a personal assistant. Respond: {ANSWER_RULES}"},
+                {"role": "system", "content": f"User context: language={user.language}, timezone={user.timezone}"},
                 {"role": "user", "content": f"Data: {result}. Generate a response."},
             ],
             temperature=0.3,
