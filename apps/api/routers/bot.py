@@ -16,6 +16,7 @@ from corelib.db.session import get_async_session
 from corelib.repositories import InviteRepository, UserRepository
 from corelib.services import LLMService, NLPService, ScheduleService
 from corelib.utils.personalize import ANSWER_RULES
+from corelib.utils.response_templates import format_event_created_response, format_schedule_response
 
 router = APIRouter()
 ALLOWED_INVITE_ROLES = {"owner", "tester", "user"}
@@ -349,6 +350,7 @@ async def handle_bot_message(
 
         result = []
         secure_replies = []
+        direct_replies = []
         for p in parsed:
             intent = p.get("intent")
             entities = p.get("entities")
@@ -393,7 +395,13 @@ async def handle_bot_message(
                     recurrence=add_event_entities.recurrence or p.get("recurrence"),
                     remind_before_minutes=add_event_entities.remind_before_minutes or p.get("remind_before_minutes", 60),
                 )
-                result.append({"event": {"title": created_event.title, "start_time": created_event.start_time.isoformat()}})
+                direct_replies.append(
+                    format_event_created_response(
+                        start_time=created_event.start_time,
+                        title=created_event.title,
+                        timezone_name=user.timezone,
+                    )
+                )
             elif intent == "get_schedule":
                 get_schedule_entities = validated_entities
                 if not isinstance(get_schedule_entities, GetScheduleEntities):
@@ -415,7 +423,14 @@ async def handle_bot_message(
                 else:
                     day = datetime.now(tz=ZoneInfo(user.timezone))
                 events = await schedule_service.get_upcoming_events(user.id, day)
-                result.append({"events": [{"title": e.title, "start_time": e.start_time.isoformat()} for e in events]})
+                event_items = [{"title": e.title, "start_time": e.start_time.isoformat()} for e in events]
+                direct_replies.append(
+                    format_schedule_response(
+                        day=day,
+                        events=event_items,
+                        timezone_name=user.timezone,
+                    )
+                )
             elif intent == "create_invite_code":
                 if user.role != "owner":
                     secure_replies.append("Only owner can create invite codes.")
@@ -465,9 +480,24 @@ async def handle_bot_message(
                 result.append({"info": "Sorry, I did not understand the request."})
 
         if secure_replies and not result:
-            reply_text = "\n".join(secure_replies)
+            reply_parts = []
+            if direct_replies:
+                reply_parts.append("\n\n".join(direct_replies))
+            reply_parts.append("\n".join(secure_replies))
+            reply_text = "\n\n".join(reply_parts)
             logger.info(
                 "reply generated request_id=%s mode=secure_only",
+                request_id,
+                extra={"log_prefix": "[RESPONSE]"},
+            )
+            return {"reply": reply_text}
+
+        if direct_replies and not result:
+            reply_text = "\n\n".join(direct_replies)
+            if secure_replies:
+                reply_text += "\n\n" + "\n".join(secure_replies)
+            logger.info(
+                "reply generated request_id=%s mode=deterministic",
                 request_id,
                 extra={"log_prefix": "[RESPONSE]"},
             )
@@ -486,6 +516,8 @@ async def handle_bot_message(
         )
 
         logger.info("reply generated request_id=%s", request_id, extra={"log_prefix": "[RESPONSE]"})
+        if direct_replies:
+            answer = "\n\n".join(direct_replies + [answer])
         if secure_replies:
             return {"reply": f"{answer}\n\n" + "\n".join(secure_replies)}
         return {"reply": answer}
