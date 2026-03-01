@@ -33,13 +33,19 @@ def format_schedule_response(
     day: datetime | str,
     events: Iterable[dict[str, str]],
     timezone_name: str | None = None,
+    language: str = "en",
 ) -> str:
     day_dt = _coerce_datetime(day, timezone_name)
     event_list = list(events)
-    if not event_list:
-        return f"On {_format_day(day_dt)} you have nothing scheduled."
-
-    lines = [f"On {_format_day(day_dt)} your schedule is:"]
+    language_code = (language or "en").split("-")[0].lower()
+    if language_code == "ru":
+        if not event_list:
+            return f"На {_format_day(day_dt)} у вас ничего не запланировано."
+        lines = [f"На {_format_day(day_dt)} ваше расписание:"]
+    else:
+        if not event_list:
+            return f"On {_format_day(day_dt)} you have nothing scheduled."
+        lines = [f"On {_format_day(day_dt)} your schedule is:"]
     for idx, event in enumerate(event_list, start=1):
         start_dt = _coerce_datetime(event["start_time"], timezone_name)
         lines.append(f"{idx}. {_format_time(start_dt)} – {event['title']}")
@@ -51,6 +57,10 @@ def format_event_created_response(
     start_time: datetime | str,
     title: str,
     timezone_name: str | None = None,
+    language: str = "en",
 ) -> str:
     start_dt = _coerce_datetime(start_time, timezone_name)
+    language_code = (language or "en").split("-")[0].lower()
+    if language_code == "ru":
+        return f"Принято. Запланировано:\n- {_format_time(start_dt)}, {_format_day(start_dt)}, {title}"
     return f"Accepted. Scheduled:\n- {_format_time(start_dt)}, {_format_day(start_dt)}, {title}"

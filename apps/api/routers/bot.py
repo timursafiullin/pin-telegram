@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+import re
 from typing import Any, Type
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -23,11 +24,63 @@ ALLOWED_INVITE_ROLES = {"owner", "tester", "user"}
 SENSITIVE_KEYS = {"password", "token", "secret", "api_key", "invite_code"}
 EXPECTED_ENTITY_FORMATS = {
     "add_event": {"date": "YYYY-MM-DD", "time": "HH:MM", "title": "optional"},
+    "add_reminder": {"date": "YYYY-MM-DD", "time": "HH:MM", "reminder_text": "optional", "timezone": "optional IANA"},
     "get_schedule": {"date": "optional YYYY-MM-DD"},
+    "set_language": {"language_code": "ISO 639-1 optional", "language_name": "optional"},
+    "set_timezone": {"timezone": "IANA optional", "city": "optional"},
+    "delete_event": {"target_id": "optional", "query": "optional"},
+    "delete_reminder": {"target_id": "optional", "query": "optional"},
+    "help": {"topic": "optional"},
+    "smalltalk": {"topic": "optional"},
     "create_invite_code": {"role": "user|tester|owner", "max_uses": ">=1", "expires_in_days": ">=1"},
 }
 logger = logging.getLogger("apps.api.bot")
 timezone_finder = TimezoneFinder()
+
+LANGUAGE_NAME_TO_CODE = {
+    "english": "en",
+    "russian": "ru",
+    "russian language": "ru",
+    "spanish": "es",
+    "german": "de",
+    "french": "fr",
+    "italian": "it",
+    "portuguese": "pt",
+    "ukrainian": "uk",
+}
+
+TRANSLATIONS = {
+    "en": {
+        "set_language_success": "Language updated: {language}.",
+        "set_timezone_success": "Timezone updated: {timezone}.",
+        "unknown_intent": "Sorry, I did not understand the request.",
+        "invalid_language": "Could not recognize language. Please provide a valid language code or language name.",
+        "invalid_timezone": "Could not recognize timezone. Please provide an IANA timezone or a known city.",
+    },
+    "ru": {
+        "set_language_success": "Язык обновлен: {language}.",
+        "set_timezone_success": "Часовой пояс обновлен: {timezone}.",
+        "unknown_intent": "Извините, я не понял запрос.",
+        "invalid_language": "Не удалось распознать язык. Укажите корректный код или название языка.",
+        "invalid_timezone": "Не удалось распознать часовой пояс. Укажите IANA-таймзону или известный город.",
+    },
+}
+
+
+def _resolve_language_code(raw_code: str | None, raw_name: str | None) -> str | None:
+    if raw_code:
+        code = raw_code.strip().lower()
+        if re.fullmatch(r"[a-z]{2}", code):
+            return code
+    if raw_name:
+        return LANGUAGE_NAME_TO_CODE.get(raw_name.strip().lower())
+    return None
+
+
+def _localized_message(user_language: str | None, key: str, **kwargs: Any) -> str:
+    language_code = (user_language or "en").split("-")[0].lower()
+    template = TRANSLATIONS.get(language_code, TRANSLATIONS["en"]).get(key, TRANSLATIONS["en"][key])
+    return template.format(**kwargs)
 
 
 class BotMessage(BaseModel):
@@ -81,6 +134,36 @@ class GetScheduleEntities(BaseModel):
     date: str | None = None
 
 
+class AddReminderEntities(BaseModel):
+    date: str
+    time: str
+    reminder_text: str | None = None
+    timezone: str | None = None
+
+
+class SetLanguageEntities(BaseModel):
+    language_code: str | None = None
+    language_name: str | None = None
+
+
+class SetTimezoneEntities(BaseModel):
+    timezone: str | None = None
+    city: str | None = None
+
+
+class DeleteTargetEntities(BaseModel):
+    target_id: str | None = None
+    query: str | None = None
+
+
+class HelpEntities(BaseModel):
+    topic: str | None = None
+
+
+class SmalltalkEntities(BaseModel):
+    topic: str | None = None
+
+
 class CreateInviteCodeEntities(BaseModel):
     role: str = "user"
     max_uses: int = Field(default=1, ge=1)
@@ -124,16 +207,36 @@ def validate_intent_payload(intent: str, entities: Any) -> tuple[BaseModel | Non
 
     models_by_intent: dict[str, Type[BaseModel]] = {
         "add_event": AddEventEntities,
+        "add_reminder": AddReminderEntities,
         "get_schedule": GetScheduleEntities,
+        "set_language": SetLanguageEntities,
+        "set_timezone": SetTimezoneEntities,
+        "delete_event": DeleteTargetEntities,
+        "delete_reminder": DeleteTargetEntities,
+        "help": HelpEntities,
+        "smalltalk": SmalltalkEntities,
         "create_invite_code": CreateInviteCodeEntities,
     }
     error_messages_by_intent = {
         "add_event": "Could not recognize date/time. Please clarify date and time.",
+        "add_reminder": "Could not recognize reminder date/time. Please clarify date and time.",
+        "set_language": "Could not recognize language. Please provide language code or language name.",
+        "set_timezone": "Could not recognize timezone. Please provide IANA timezone or city.",
+        "delete_event": "Could not identify which event to delete. Provide event id or description.",
+        "delete_reminder": "Could not identify which reminder to delete. Provide reminder id or description.",
         "create_invite_code": "Could not recognize invite parameters. Please clarify your request.",
     }
 
     if intent == "add_event" and (not safe_entities.get("date") or not safe_entities.get("time")):
         return None, error_messages_by_intent["add_event"]
+    if intent == "add_reminder" and (not safe_entities.get("date") or not safe_entities.get("time")):
+        return None, error_messages_by_intent["add_reminder"]
+    if intent == "set_language" and not (safe_entities.get("language_code") or safe_entities.get("language_name")):
+        return None, error_messages_by_intent["set_language"]
+    if intent == "set_timezone" and not (safe_entities.get("timezone") or safe_entities.get("city")):
+        return None, error_messages_by_intent["set_timezone"]
+    if intent in {"delete_event", "delete_reminder"} and not (safe_entities.get("target_id") or safe_entities.get("query")):
+        return None, error_messages_by_intent[intent]
 
     model_cls = models_by_intent.get(intent)
     if model_cls is None:
@@ -400,6 +503,7 @@ async def handle_bot_message(
                         start_time=created_event.start_time,
                         title=created_event.title,
                         timezone_name=user.timezone,
+                        language=user.language or "en",
                     )
                 )
             elif intent == "get_schedule":
@@ -429,8 +533,45 @@ async def handle_bot_message(
                         day=day,
                         events=event_items,
                         timezone_name=user.timezone,
+                        language=user.language or "en",
                     )
                 )
+            elif intent == "set_language":
+                language_entities = validated_entities
+                if not isinstance(language_entities, SetLanguageEntities):
+                    secure_replies.append(_localized_message(user.language, "invalid_language"))
+                    continue
+                resolved_language = _resolve_language_code(language_entities.language_code, language_entities.language_name)
+                if not resolved_language:
+                    secure_replies.append(_localized_message(user.language, "invalid_language"))
+                    continue
+                await user_repo.update_profile(user, name=user.name, language=resolved_language)
+                user.language = resolved_language
+                direct_replies.append(_localized_message(user.language, "set_language_success", language=resolved_language))
+            elif intent == "set_timezone":
+                timezone_entities = validated_entities
+                if not isinstance(timezone_entities, SetTimezoneEntities):
+                    secure_replies.append(_localized_message(user.language, "invalid_timezone"))
+                    continue
+                next_timezone = None
+                if timezone_entities.timezone:
+                    candidate = timezone_entities.timezone.strip()
+                    try:
+                        ZoneInfo(candidate)
+                        next_timezone = candidate
+                    except ZoneInfoNotFoundError:
+                        next_timezone = None
+                if not next_timezone and timezone_entities.city:
+                    city = timezone_entities.city.strip()
+                    if city:
+                        # simple fallback for city phrases when only city is available
+                        next_timezone = normalize_iana_timezone(city, fallback="")
+                if not next_timezone:
+                    secure_replies.append(_localized_message(user.language, "invalid_timezone"))
+                    continue
+                await user_repo.activate_user_with_timezone(user, next_timezone, role=user.role)
+                user.timezone = next_timezone
+                direct_replies.append(_localized_message(user.language, "set_timezone_success", timezone=next_timezone))
             elif intent == "create_invite_code":
                 if user.role != "owner":
                     secure_replies.append("Only owner can create invite codes.")
@@ -477,7 +618,7 @@ async def handle_bot_message(
                 ]
                 secure_replies.append("Your invite codes:\n" + "\n".join(lines))
             else:
-                result.append({"info": "Sorry, I did not understand the request."})
+                result.append({"info": _localized_message(user.language, "unknown_intent")})
 
         if secure_replies and not result:
             reply_parts = []
@@ -510,6 +651,7 @@ async def handle_bot_message(
             [
                 {"role": "system", "content": f"You are a personal assistant. Respond: {ANSWER_RULES}"},
                 {"role": "system", "content": f"User context: language={user.language}, timezone={user.timezone}"},
+                {"role": "system", "content": "Always reply in the language from user context. Keep deterministic bullet/list structure if present."},
                 {"role": "user", "content": f"Data: {result}. Generate a response."},
             ],
             temperature=0.3,
