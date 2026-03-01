@@ -1,19 +1,30 @@
+import logging
 from datetime import datetime
 from typing import Any, Type
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil import parser
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.deps import get_llm_service, get_nlp_service, get_schedule_service, get_user
+from apps.config import settings
 from corelib.db.session import get_async_session
 from corelib.repositories import InviteRepository, UserRepository
 from corelib.services import LLMService, NLPService, ScheduleService
+from corelib.utils.personalize import ANSWER_RULES
 
 router = APIRouter()
 ALLOWED_INVITE_ROLES = {"owner", "tester", "user"}
+SENSITIVE_KEYS = {"password", "token", "secret", "api_key", "invite_code"}
+EXPECTED_ENTITY_FORMATS = {
+    "add_event": {"date": "YYYY-MM-DD", "time": "HH:MM", "title": "optional"},
+    "get_schedule": {"date": "optional YYYY-MM-DD"},
+    "create_invite_code": {"role": "user|tester|owner", "max_uses": ">=1", "expires_in_days": ">=1"},
+}
+logger = logging.getLogger("apps.api.bot")
 
 
 class BotMessage(BaseModel):
@@ -60,6 +71,26 @@ class CreateInviteCodeEntities(BaseModel):
     role: str = "user"
     max_uses: int = Field(default=1, ge=1)
     expires_in_days: int = Field(default=3, ge=1)
+
+
+def _mask_sensitive_data(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        masked: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key.lower() in SENSITIVE_KEYS:
+                masked[key] = "***"
+            else:
+                masked[key] = _mask_sensitive_data(value)
+        return masked
+    if isinstance(payload, list):
+        return [_mask_sensitive_data(item) for item in payload]
+    return payload
+
+
+def _visible_text(text: str) -> str:
+    if settings.LOG_VERBOSE_BOT_PAYLOAD:
+        return text
+    return "[REDACTED: set LOG_VERBOSE_BOT_PAYLOAD=true for full payload]"
 
 
 def validate_intent_payload(intent: str, entities: Any) -> tuple[BaseModel | None, str | None]:
@@ -204,128 +235,193 @@ async def my_invites(telegram_id: str, session: AsyncSession = Depends(get_async
 @router.post("/message")
 async def handle_bot_message(
     payload: BotMessage,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     nlp_service: NLPService = Depends(get_nlp_service),
     schedule_service: ScheduleService = Depends(get_schedule_service),
     llm_service: LLMService = Depends(get_llm_service),
 ):
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request_time = datetime.utcnow().isoformat()
+
+    logger.info(
+        "incoming /bot/message user_id=%s request_id=%s time=%s text=%s",
+        payload.user_id,
+        request_id,
+        request_time,
+        _visible_text(payload.text),
+        extra={"log_prefix": "[REQUEST]"},
+    )
+
     user_repo = UserRepository(session)
     user = await user_repo.get_by_telegram_id(payload.user_id)
     if user is None:
+        logger.warning(
+            "user not found for request_id=%s user_id=%s",
+            request_id,
+            payload.user_id,
+            extra={"log_prefix": "[RESPONSE]"},
+        )
         raise HTTPException(status_code=404, detail="User not found")
 
-    parsed = await nlp_service.parse_intent_list(payload.text)
-
-    result = []
-    secure_replies = []
-    for p in parsed:
-        intent = p.get("intent")
-        entities = p.get("entities")
-        validated_entities, validation_error = validate_intent_payload(intent, entities)
-
-        if validation_error:
-            secure_replies.append(validation_error)
-            continue
-
-        if intent == "add_event":
-            add_event_entities = validated_entities
-            if not isinstance(add_event_entities, AddEventEntities):
-                secure_replies.append("Could not process event parameters. Please clarify your request.")
-                continue
-            try:
-                dt = parser.parse(f"{add_event_entities.date} {add_event_entities.time}").astimezone(
-                    ZoneInfo(user.timezone)
-                )
-            except (ValueError, TypeError, OverflowError):
-                secure_replies.append("Invalid date/time format. Please use something like: 2026-03-20 18:30")
-                continue
-
-            created_event = await schedule_service.create_event(
-                user_id=user.id,
-                title=add_event_entities.title or p.get("title") or "Event",
-                start_time=dt,
-                location=add_event_entities.location or p.get("location"),
-                recurrence=add_event_entities.recurrence or p.get("recurrence"),
-                remind_before_minutes=add_event_entities.remind_before_minutes or p.get("remind_before_minutes", 60),
+    parsed: list[dict[str, Any]] = []
+    try:
+        parsed = await nlp_service.parse_intent_list(payload.text)
+        for packet in parsed:
+            logger.info(
+                "nlp parse request_id=%s intent=%s entities=%s",
+                request_id,
+                packet.get("intent"),
+                _mask_sensitive_data(packet.get("entities") or {}),
+                extra={"log_prefix": "[NLP]"},
             )
-            result.append({"event": {"title": created_event.title, "start_time": created_event.start_time.isoformat()}})
-        elif intent == "get_schedule":
-            get_schedule_entities = validated_entities
-            if not isinstance(get_schedule_entities, GetScheduleEntities):
-                secure_replies.append("Could not recognize schedule date. Please clarify your request.")
+
+        result = []
+        secure_replies = []
+        for p in parsed:
+            intent = p.get("intent")
+            entities = p.get("entities")
+            validated_entities, validation_error = validate_intent_payload(intent, entities)
+
+            if validation_error:
+                logger.warning(
+                    "intent validation failed request_id=%s intent=%s entities=%s expected=%s error=%s",
+                    request_id,
+                    intent,
+                    _mask_sensitive_data(entities if isinstance(entities, dict) else {"raw": entities}),
+                    EXPECTED_ENTITY_FORMATS.get(intent),
+                    validation_error,
+                    extra={"log_prefix": "[NLP]"},
+                )
+                secure_replies.append(validation_error)
                 continue
-            if get_schedule_entities.date:
-                try:
-                    day = parser.parse(get_schedule_entities.date)
-                except (ValueError, TypeError, OverflowError):
-                    secure_replies.append("Invalid schedule date format. Please provide a valid date.")
+
+            if intent == "add_event":
+                add_event_entities = validated_entities
+                if not isinstance(add_event_entities, AddEventEntities):
+                    secure_replies.append("Could not process event parameters. Please clarify your request.")
                     continue
-            else:
-                day = datetime.now(tz=ZoneInfo(user.timezone))
-            events = await schedule_service.get_upcoming_events(user.id, day)
-            result.append({"events": [{"title": e.title, "start_time": e.start_time.isoformat()} for e in events]})
-        elif intent == "create_invite_code":
-            if user.role != "owner":
-                secure_replies.append("Only owner can create invite codes.")
-                continue
-            invite_entities = validated_entities
-            if not isinstance(invite_entities, CreateInviteCodeEntities):
-                secure_replies.append("Could not recognize invite parameters. Please clarify your request.")
-                continue
-            role = invite_entities.role
-            max_uses = invite_entities.max_uses
-            expires_in_days = invite_entities.expires_in_days
-            if role not in ALLOWED_INVITE_ROLES:
-                secure_replies.append("Unknown role for invite code.")
-                continue
-            if max_uses < 1 or expires_in_days < 1:
-                secure_replies.append("max_uses and expires_in_days must be >= 1")
-                continue
-            invite_repo = InviteRepository(schedule_service.event_repo.session)
-            invite = await invite_repo.create_invite(
-                created_by=user.id,
-                role=role,
-                max_uses=max_uses,
-                expires_in_days=expires_in_days,
-            )
-            secure_replies.append(
-                "Invite created: "
-                f"code={invite.code}, role={invite.role}, max_uses={invite.max_uses}, "
-                f"expires_at={invite.expires_at.isoformat() if invite.expires_at else 'never'}"
-            )
-        elif intent == "list_my_invite_codes":
-            invite_repo = InviteRepository(schedule_service.event_repo.session)
-            invites = await invite_repo.get_by_creator(user.id)
-            if not invites:
-                secure_replies.append("You do not have invite codes yet.")
-                continue
-            lines = [
-                (
-                    f"{invite.code} | role={invite.role} | uses={invite.uses_count}/"
-                    f"{invite.max_uses if invite.max_uses is not None else '∞'} | "
-                    f"expires_at={invite.expires_at.isoformat() if invite.expires_at else 'never'} | "
-                    f"active={invite.is_active}"
+                try:
+                    dt = parser.parse(f"{add_event_entities.date} {add_event_entities.time}").astimezone(ZoneInfo(user.timezone))
+                except (ValueError, TypeError, OverflowError):
+                    logger.warning(
+                        "date parsing failed request_id=%s source=%s expected=%s",
+                        request_id,
+                        f"{add_event_entities.date} {add_event_entities.time}",
+                        EXPECTED_ENTITY_FORMATS["add_event"],
+                        extra={"log_prefix": "[NLP]"},
+                    )
+                    secure_replies.append("Invalid date/time format. Please use something like: 2026-03-20 18:30")
+                    continue
+
+                created_event = await schedule_service.create_event(
+                    user_id=user.id,
+                    title=add_event_entities.title or p.get("title") or "Event",
+                    start_time=dt,
+                    location=add_event_entities.location or p.get("location"),
+                    recurrence=add_event_entities.recurrence or p.get("recurrence"),
+                    remind_before_minutes=add_event_entities.remind_before_minutes or p.get("remind_before_minutes", 60),
                 )
-                for invite in invites
-            ]
-            secure_replies.append("Your invite codes:\n" + "\n".join(lines))
-        else:
-            result.append({"info": "Sorry, I did not understand the request."})
+                result.append({"event": {"title": created_event.title, "start_time": created_event.start_time.isoformat()}})
+            elif intent == "get_schedule":
+                get_schedule_entities = validated_entities
+                if not isinstance(get_schedule_entities, GetScheduleEntities):
+                    secure_replies.append("Could not recognize schedule date. Please clarify your request.")
+                    continue
+                if get_schedule_entities.date:
+                    try:
+                        day = parser.parse(get_schedule_entities.date)
+                    except (ValueError, TypeError, OverflowError):
+                        logger.warning(
+                            "schedule date parsing failed request_id=%s source=%s expected=%s",
+                            request_id,
+                            get_schedule_entities.date,
+                            EXPECTED_ENTITY_FORMATS["get_schedule"],
+                            extra={"log_prefix": "[NLP]"},
+                        )
+                        secure_replies.append("Invalid schedule date format. Please provide a valid date.")
+                        continue
+                else:
+                    day = datetime.now(tz=ZoneInfo(user.timezone))
+                events = await schedule_service.get_upcoming_events(user.id, day)
+                result.append({"events": [{"title": e.title, "start_time": e.start_time.isoformat()} for e in events]})
+            elif intent == "create_invite_code":
+                if user.role != "owner":
+                    secure_replies.append("Only owner can create invite codes.")
+                    continue
+                invite_entities = validated_entities
+                if not isinstance(invite_entities, CreateInviteCodeEntities):
+                    secure_replies.append("Could not recognize invite parameters. Please clarify your request.")
+                    continue
+                role = invite_entities.role
+                max_uses = invite_entities.max_uses
+                expires_in_days = invite_entities.expires_in_days
+                if role not in ALLOWED_INVITE_ROLES:
+                    secure_replies.append("Unknown role for invite code.")
+                    continue
+                if max_uses < 1 or expires_in_days < 1:
+                    secure_replies.append("max_uses and expires_in_days must be >= 1")
+                    continue
+                invite_repo = InviteRepository(schedule_service.event_repo.session)
+                invite = await invite_repo.create_invite(
+                    created_by=user.id,
+                    role=role,
+                    max_uses=max_uses,
+                    expires_in_days=expires_in_days,
+                )
+                secure_replies.append(
+                    "Invite created: "
+                    f"code={invite.code}, role={invite.role}, max_uses={invite.max_uses}, "
+                    f"expires_at={invite.expires_at.isoformat() if invite.expires_at else 'never'}"
+                )
+            elif intent == "list_my_invite_codes":
+                invite_repo = InviteRepository(schedule_service.event_repo.session)
+                invites = await invite_repo.get_by_creator(user.id)
+                if not invites:
+                    secure_replies.append("You do not have invite codes yet.")
+                    continue
+                lines = [
+                    (
+                        f"{invite.code} | role={invite.role} | uses={invite.uses_count}/"
+                        f"{invite.max_uses if invite.max_uses is not None else '∞'} | "
+                        f"expires_at={invite.expires_at.isoformat() if invite.expires_at else 'never'} | "
+                        f"active={invite.is_active}"
+                    )
+                    for invite in invites
+                ]
+                secure_replies.append("Your invite codes:\n" + "\n".join(lines))
+            else:
+                result.append({"info": "Sorry, I did not understand the request."})
 
-    if secure_replies and not result:
-        return {"reply": "\n".join(secure_replies)}
+        if secure_replies and not result:
+            reply_text = "\n".join(secure_replies)
+            logger.info(
+                "reply generated request_id=%s mode=secure_only",
+                request_id,
+                extra={"log_prefix": "[RESPONSE]"},
+            )
+            return {"reply": reply_text}
 
-    if secure_replies:
-        result.append({"secure_info": "Invite operations completed. Sensitive data omitted."})
+        if secure_replies:
+            result.append({"secure_info": "Invite operations completed. Sensitive data omitted."})
 
-    answer = await llm_service.chat_completion(
-        [
-            {"role": "system", "content": "You are a personal assistant. Respond in a friendly and concise manner."},
-            {"role": "user", "content": f"Data: {result}. Generate a response."},
-        ],
-        temperature=0.3,
-    )
+        answer = await llm_service.chat_completion(
+            [
+                {"role": "system", "content": f"You are a personal assistant. Respond: {ANSWER_RULES}"},
+                {"role": "user", "content": f"Data: {result}. Generate a response."},
+            ],
+            temperature=0.3,
+        )
 
-    if secure_replies:
-        return {"reply": f"{answer}\n\n" + "\n".join(secure_replies)}
-    return {"reply": answer}
+        logger.info("reply generated request_id=%s", request_id, extra={"log_prefix": "[RESPONSE]"})
+        if secure_replies:
+            return {"reply": f"{answer}\n\n" + "\n".join(secure_replies)}
+        return {"reply": answer}
+    except Exception:
+        logger.exception(
+            "unhandled error in /bot/message request_id=%s intents=%s",
+            request_id,
+            _mask_sensitive_data(parsed),
+            extra={"log_prefix": "[ERROR]"},
+        )
+        raise
