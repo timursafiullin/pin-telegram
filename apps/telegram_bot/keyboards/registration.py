@@ -1,5 +1,8 @@
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.types import (
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup
+)
 
 from apps.config import settings
 
@@ -73,3 +76,21 @@ def get_timezone_keyboard(default_timezone: str = settings.DEFAULT_TIMEZONE) -> 
     )
     
     return builder.as_markup()
+
+
+def share_geolocation_reply() -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    
+    builder.row(
+        KeyboardButton(
+            text="📡 Share",
+            request_location=True
+        ),
+        KeyboardButton(
+            text="🔙 Go back",
+            callback_data="back_to_choose_timezone"
+        ),
+        width=2
+    )
+    
+    return builder.as_markup(resize_keyboard=True, one_time_keyboard=True, selective=True)

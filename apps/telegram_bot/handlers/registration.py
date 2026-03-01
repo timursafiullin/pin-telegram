@@ -9,7 +9,8 @@ from apps.telegram_bot.keyboards.registration import (
     get_timezone_keyboard,
     get_registration_type_keyboard,
     back_to_choose_reg_type_button,
-    request_confirmation
+    request_confirmation,
+    share_geolocation_reply,
 )
 
 router = Router()
@@ -121,7 +122,7 @@ async def handle_invite(message: Message, state: FSMContext):
 
 
 @router.message(StateFilter(Registration.awaiting_timezone))
-async def handle_timezone(message: Message, state: FSMContext, ):
+async def handle_timezone(message: Message, state: FSMContext):
     telegram_id = str(message.from_user.id)
     payload = {"telegram_id": telegram_id, "timezone": message.text.strip()}
 
@@ -137,3 +138,20 @@ async def handle_timezone(message: Message, state: FSMContext, ):
 
     await state.clear()
     await message.answer("Registration completed. You can now send regular requests.")
+
+
+@router.callback_query(F.data == "choose_own_timezone")
+async def handle_choose_own_timezone(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        text="Choose one on keyboard.",
+        reply_markup=share_geolocation_reply()
+    )
+
+
+@router.message(F.text == "🔙 Go back")
+@router.callback_query(F.data == "back_to_choose_timezone")
+async def handle_back_to_timezone(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        text="Please, share your location to set your time zone. This is necessary for schedules and reminders to work correctly.",
+        reply_markup=get_timezone_keyboard()
+    )
