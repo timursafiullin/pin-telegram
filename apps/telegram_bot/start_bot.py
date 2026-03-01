@@ -12,8 +12,10 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from apps.config import settings
+
 from apps.telegram_bot.handlers.messages import router as message_router
-from apps.telegram_bot.handlers.start import start_router
+from apps.telegram_bot.handlers.registration import router as start_router
+from apps.telegram_bot.handlers.invites import router as invites_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,6 +28,7 @@ dp = Dispatcher(storage=storage)
 async def main():
     logger.info("Starting Personal Intelligence Node – Telegram Bot...")
     dp.include_router(start_router)
+    dp.include_router(invites_router)
     dp.include_router(message_router)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
