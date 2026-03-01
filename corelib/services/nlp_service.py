@@ -21,3 +21,9 @@ class NLPService:
             return json.loads(raw_json)
         except json.JSONDecodeError:
             return {"intent": "unknown", "entities": {}}
+
+    async def parse_intent_list(self, user_message: str) -> list[dict]:
+        parsed = await self.parse_intent(user_message)
+        if isinstance(parsed, list):
+            return parsed
+        return [parsed]

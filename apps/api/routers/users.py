@@ -4,5 +4,5 @@ router = APIRouter()
 
 
 @router.get('/health')
-async def events_health():
+async def users_health():
     return {'status': 'ok'}
