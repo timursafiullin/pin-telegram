@@ -7,4 +7,4 @@ start_router = Router()
 @start_router.message(CommandStart())
 async def handle_start(message: Message):
     user_id = message.from_user.id if message.from_user else "unknown"
-    await message.answer(text=f"Ваш user_id: {user_id}")
+    await message.answer(text=f"Your user_id: {user_id}")
