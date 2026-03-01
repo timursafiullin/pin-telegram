@@ -1,5 +1,5 @@
 # Project
-Personal Intelligence Node (PIN) — локальный AI-ассистент как ядро персональной цифровой инфраструктуры с возможностью масштабирования в multi-user платформу и закрытую локальную сеть.
+**Personal Intelligence Node (PIN)** — a local AI assistant as the core of personal digital infrastructure with the ability to scale into a multi-user platform and a closed local network.
 
 # Contributing
 
