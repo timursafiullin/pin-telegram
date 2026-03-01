@@ -25,21 +25,6 @@ async def handle_timezone(message: Message, state: FSMContext):
     await message.answer("Registration completed. You can now send regular requests.")
 
 
-@router.message()
-async def handle_message(message: Message):
-    data = {"user_id": str(message.from_user.id), "text": message.text}
-    async with httpx.AsyncClient() as client:
-        response = await client.post("http://localhost:8000/bot/message", json=data)
-
-    if response.status_code == 403:
-        await message.answer("Please complete registration through /start first.")
-        return
-
-    response.raise_for_status()
-    reply = response.json()["reply"]
-    await message.answer(reply)
-
-
 @router.message(Command("create_invite_code"))
 async def create_invite_code_command(message: Message):
     telegram_id = str(message.from_user.id)
@@ -107,3 +92,18 @@ async def handle_invite(message: Message, state: FSMContext):
 
     await state.set_state(Registration.awaiting_timezone)
     await message.answer("Invite accepted. Please provide your timezone in IANA format, for example, Europe/Moscow.")
+
+
+@router.message()
+async def handle_message(message: Message):
+    data = {"user_id": str(message.from_user.id), "text": message.text}
+    async with httpx.AsyncClient() as client:
+        response = await client.post("http://localhost:8000/bot/message", json=data)
+
+    if response.status_code == 403:
+        await message.answer("Please complete registration through /start first.")
+        return
+
+    response.raise_for_status()
+    reply = response.json()["reply"]
+    await message.answer(reply)
