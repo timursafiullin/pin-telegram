@@ -462,3 +462,55 @@ Recommendation:
 * Avoid heavy agent frameworks initially
 * Keep model abstraction from day one
 * Add integrations gradually
+
+Possible structure:
+```
+pin/
+├── apps/
+│   ├── api/
+│   │   ├── main.py            # создание FastAPI, включение роутеров
+│   │   ├── deps.py            # зависимости (получение DB‑сессии, сервисов)
+│   │   ├── routers/
+│   │   │   ├── bot.py         # обработчики сообщений от Telegram‑бота
+│   │   │   ├── users.py       # CRUD пользователей и auth
+│   │   │   ├── events.py      # CRUD событий/напоминаний
+│   │   │   └── ...            # другие модули по мере роста
+│   ├── telegram_bot/
+│   │   ├── config.py          # TELEGRAM_BOT_API_KEY, другие переменные
+│   │   ├── create_bot.py      # инициализация aiogram
+│   │   ├── handlers/
+│   │   │   ├── start.py       # start‑команда
+│   │   │   └── message.py     # отправка текстов в API и возврат ответа
+│   │   └── start_bot.py       # точка входа
+├── corelib/
+│   ├── __init__.py
+│   ├── config.py              # Pydantic Settings (DB, LLM‑провайдер и т.п.)
+│   ├── db/
+│   │   ├── base.py            # declarative_base()
+│   │   ├── models.py          # ORM‑модели (User, Event, Message, Finance...)
+│   │   ├── session.py         # создание движка и sessionmaker
+│   ├── schemas/
+│   │   ├── user.py            # Pydantic‑схемы (UserCreate, UserRead, ...)
+│   │   ├── event.py
+│   │   ├── message.py
+│   │   └── ...
+│   ├── repositories/
+│   │   ├── user_repo.py       # CRUD‑методы над User (асинхронно)
+│   │   ├── event_repo.py
+│   │   └── ...
+│   ├── services/
+│   │   ├── llm_service.py     # обёртка над провайдером LLM (zveno.ai, local)
+│   │   ├── nlp_service.py     # парсинг намерений, извлечение сущностей
+│   │   ├── schedule_service.py# создание событий, напоминаний
+│   │   ├── finance_service.py # операции с расходами/доходами
+│   │   └── ...
+│   ├── utils/
+│   │   ├── prompts.py         # шаблоны запросов к LLM
+│   │   ├── llm_cache.py       # (опционально) кэширование ответов
+│   │   └── ...
+├── migrations/
+│   └── versions/...
+├── tests/
+│   └── ...                    # pytest- или unittest‑тесты
+└── .env                       # окружение (не коммитить в репозиторий)
+```
