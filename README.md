@@ -1,5 +1,5 @@
 # Project
-**Personal Intelligence Node (PIN)** — a local AI assistant as the core of personal digital infrastructure with the ability to scale into a multi-user platform and a closed local network.
+**Personal Intelligence Node (PIN)** – an AI assistant for personal digital infrastructure, designed to scale into a multi-user platform within a closed local network. This repository provides an example of a Telegram bot interface for interacting with the assistant.
 
 # Contributing
 
