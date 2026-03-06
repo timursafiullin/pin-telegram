@@ -12,6 +12,7 @@ class User(Base):
     name = Column(String, nullable=True)
     role = Column(String, nullable=False, default="tester")
     timezone = Column(String, nullable=False, default="Europe/Moscow")
+    language = Column(String, nullable=False, default="en")
     password_hash = Column(String, nullable=True)
     is_active = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
